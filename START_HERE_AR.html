@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>إنشاء جدول الحالة — حزمة سكرتير العيادة</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f4f6fa;color:#152238;font-family:Rubik,"Segoe UI",Tahoma,sans-serif;font-size:21px;line-height:1.8}
+main{max-width:1120px;margin:36px auto;padding:0 28px 40px}
+h1{font-size:36px;line-height:1.4;margin:0 0 8px}
+h2{font-size:26px;margin:0 0 16px}
+p{margin:6px 0 18px}
+section{background:white;border:1px solid #d9e0eb;border-radius:14px;padding:24px 28px;margin:20px 0}
+.route{font-size:18px;color:#41516a}
+code{direction:ltr;unicode-bidi:isolate;display:inline-block;font-family:Consolas,"Courier New",monospace;font-size:22px;font-weight:600}
+.copyline{display:flex;align-items:center;justify-content:space-between;gap:20px;background:#f4f7fc;border:1px solid #d9e0eb;border-radius:9px;padding:12px 18px}
+button{font:inherit;font-size:18px;font-weight:600;background:#1958c8;color:white;border:0;border-radius:8px;padding:9px 22px;cursor:pointer;white-space:nowrap}
+button:hover{background:#12449d}
+button:focus-visible{outline:3px solid #89b4ff;outline-offset:3px}
+table{width:100%;border-collapse:collapse;text-align:right}
+th{font-size:18px;color:#52627a;font-weight:600}
+th,td{padding:12px 10px;border-bottom:1px solid #e4e9f0}
+td:last-child{width:120px;text-align:left}
+.type{direction:ltr;unicode-bidi:isolate;font-size:19px;color:#41516a}
+.payload-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:22px}
+.payload{direction:ltr;text-align:left;unicode-bidi:isolate;display:block;white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f7fc;border:1px solid #d9e0eb;border-radius:9px;padding:18px;line-height:1.65;font-size:21px}
+.note{font-size:18px;color:#52627a;margin-top:16px}
+#copy-status{min-height:32px;color:#175f3a;font-size:18px}
+footer{font-size:17px;color:#52627a}
+@media(max-width:650px){body{font-size:18px}main{padding:0 14px;margin-top:24px}section{padding:20px 16px}h1{font-size:29px}code{font-size:18px}.payload{font-size:17px}th,td{padding:12px 4px}button{font-size:16px;padding:8px 15px}.copyline{gap:12px;padding:12px}}
+</style>
+</head>
+<body>
+<main>
+<h1>إنشاء جدول الحالة</h1>
+<p>انسخ كل اسم وقيمة من الزر اللي جنبها، وارجع للصقها في n8n.</p>
+<p class="route"><bdi dir="ltr">Personal → Data tables → Create data table → From scratch</bdi></p>
+
+<section>
+<h2>١. اسم الجدول</h2>
+<div class="copyline"><code id="table-name">C06 Public State</code><button type="button" data-copy="table-name" aria-label="نسخ اسم الجدول">نسخ</button></div>
+<p class="note">الصق الاسم وقت إنشاء الجدول، وبعدها اضغط Create.</p>
+</section>
+
+<section>
+<h2>٢. الأعمدة</h2>
+<p>اضغط <bdi dir="ltr">Add Column</bdi> لكل عمود. انسخ الاسم واختار النوع المكتوب في نفس الصف.</p>
+<table>
+<thead><tr><th>اسم العمود</th><th>النوع في n8n</th><th>نسخ الاسم</th></tr></thead>
+<tbody>
+<tr><td><code id="column-revision">revision</code></td><td><span class="type">Number</span></td><td><button type="button" data-copy="column-revision" aria-label="نسخ اسم revision">نسخ</button></td></tr>
+<tr><td><code id="column-payload">payload</code></td><td><span class="type">String</span></td><td><button type="button" data-copy="column-payload" aria-label="نسخ اسم payload">نسخ</button></td></tr>
+<tr><td><code id="column-mutation">mutation</code></td><td><span class="type">String</span></td><td><button type="button" data-copy="column-mutation" aria-label="نسخ اسم mutation">نسخ</button></td></tr>
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>٣. صف البداية</h2>
+<p>اضغط <bdi dir="ltr">Add Row</bdi> مرة واحدة، واملأ الصف بالقيم التالية.</p>
+<table>
+<thead><tr><th>العمود</th><th>القيمة</th><th>نسخ القيمة</th></tr></thead>
+<tbody>
+<tr><td><code>revision</code></td><td><code id="value-revision">0</code></td><td><button type="button" data-copy="value-revision" aria-label="نسخ قيمة revision">نسخ</button></td></tr>
+<tr><td><code>mutation</code></td><td><code id="value-mutation">initialize</code></td><td><button type="button" data-copy="value-mutation" aria-label="نسخ قيمة mutation">نسخ</button></td></tr>
+</tbody>
+</table>
+<div class="payload-head"><p>قيمة <code>payload</code> كاملة</p><button type="button" data-copy="value-payload" aria-label="نسخ نص payload كاملًا">نسخ JSON</button></div>
+<code id="value-payload" class="payload">{"schema":1,"counters":{},"sessions":{},"events":{},"visits":{},"next_sheet_row":2}</code>
+<p class="note">الصق النص كاملًا في خلية payload واحدة. راجع إن الصف الأول أخد <code>id=1</code>. أعمدة id وcreatedAt وupdatedAt بيجهّزها n8n تلقائيًا.</p>
+</section>
+<p id="copy-status" role="status" aria-live="polite"></p>
+<footer>الملف ده بيشتغل محليًا من غير اتصال. دليل باقي التركيب في README_AR.md، وبرومبت المساعد في INSTALL_ASSISTANT_AR.md. إصدار الحزمة الحالي 0.1.0-review للمراجعة.</footer>
+</main>
+<script>
+async function copyValue(button) {
+  const valueElement = document.getElementById(button.dataset.copy);
+  const value = valueElement.textContent;
+  const status = document.getElementById('copy-status');
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(value);
+    copied = true;
+  } catch {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(valueElement);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    try {
+      copied = document.execCommand('copy');
+    } catch {
+      copied = false;
+    }
+    if (copied) selection.removeAllRanges();
+  }
+  if (copied) {
+    button.textContent = 'اتنسخ ✓';
+    status.textContent = 'اتنسخ. ارجع لـn8n والصق القيمة.';
+    setTimeout(() => {
+      button.textContent = button.dataset.copy === 'value-payload' ? 'نسخ JSON' : 'نسخ';
+    }, 1800);
+  } else {
+    status.textContent = 'النص متحدد. اضغط Ctrl+C لنسخه.';
+  }
+}
+document.querySelectorAll('button[data-copy]').forEach(button => {
+  button.addEventListener('click', () => copyValue(button));
+});
+</script>
+</body>
+</html>

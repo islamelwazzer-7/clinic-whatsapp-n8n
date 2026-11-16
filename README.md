@@ -9,7 +9,7 @@
 
 ## تنزيل الحزمة
 
-من [صفحة الإصدارات](https://github.com/islamelwazzer-7/clinic-whatsapp-n8n/releases) افتح `v0.1.0-review`، وتحت **Assets** نزّل الملف المرفق `C06-public-setup-v0.1.0-review.zip`. فك الضغط، وبعدها افتح `README_AR.md` وابدأ استيراد `01-state-engine.json` ثم `02-clinic-whatsapp.json`.
+من [صفحة الإصدارات](https://github.com/islamelwazzer-7/clinic-whatsapp-n8n/releases) افتح `v0.1.0-review`، وتحت **Assets** نزّل الملف المرفق `C06-public-setup-v0.1.0-review.zip`. فك الضغط، وافتح `START_HERE_AR.html` في Chrome أو Edge لنسخ اسم الجدول وأعمدته وصف البداية بأزرار جاهزة. دليل التركيب الكامل في `README_AR.md`. استورد `01-state-engine.json` ثم `02-clinic-whatsapp.json`.
 
 ## محتويات ZIP
 
@@ -19,6 +19,7 @@
 | `02-clinic-whatsapp.json` | استقبال الرسائل وفهمها وقراءة الشيت وحفظ الزيارة وإرسال التأكيد. |
 | `clinic-sheet.xlsx` | قالب شيت بخمس تابات وبيانات وهمية. الزيارات هيدر فقط. |
 | `state-seed.json` | أعمدة جدول الحالة وصف البداية. |
+| `START_HERE_AR.html` | صفحة محلية واضحة في المتصفح، بأزرار نسخ اسم الجدول والأعمدة وقيم الصف. |
 | `README_AR.md` | دليل التركيب. |
 | `INSTALL_ASSISTANT_AR.md` | برومبت المساعد، ويغطي Evolution الموجود أو المتعطل أو الناقص. |
 | `BOOTSTRAP_AR.md` | تجهيز الخدمات الناقصة عند الاحتياج. |
