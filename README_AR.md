@@ -10,8 +10,24 @@
 ## ١. n8n — استيراد وتهيئة مرة واحدة
 
 1. في n8n التجريبي، اختار **Import from File** واستورد `01-state-engine.json` ثم `02-clinic-whatsapp.json` في نفس المشروع. خليهُم غير نشطين أثناء الربط.
-2. من **Data tables** اعمل جدول جديد باسم `C06 Public State`. أضف الأعمدة والصف الموجودين في `state-seed.json`. `revision` نوعه Number، و`payload` و`mutation` نوعهم String. `payload` يتلصق كنص JSON. اتأكد إن n8n أعطى الصف الأول `id=1`. التهيئة مرة واحدة لجدول جديد، والشغل الحالي يستكمل من جدوله القائم.
+2. من **Data tables** اضغط **Create data table** واختار **From scratch** وسمّي الجدول `C06 Public State`. اضغط **Add Column** لإضافة `revision` بنوع Number، و`payload` و`mutation` بنوع String. بعدها اضغط **Add Row** واملأ القيم الجاهزة للنسخ تحت. بنية الجدول وصف البداية موجودين كمان في `state-seed.json`. اتأكد إن n8n أعطى الصف الأول `id=1`. التهيئة مرة واحدة لجدول جديد، والشغل الحالي يستكمل من جدوله القائم.
 3. في المحرك اختار جدول `C06 Public State` في **Read State 1–3** و**Save State 1–3**. في الرئيسية اربط الـWorkflow الداخلي في **Begin Direct State** و**Prepare Direct Reply** و**Confirm Visit Sheet Save** و**Claim Telegram** و**Confirm Telegram Delivery** و**Claim WhatsApp** و**Confirm WhatsApp Delivery** و**Release Failed Conversation**. لو المساعد عنده وصول مباشر يقدر يضبط كل المراجع دي دفعة واحدة.
+
+### صف البداية — انسخ من هنا
+
+الخطوات والنصوص الثابتة للتركيب موجودة في الدليل ده داخل ZIP وعلى GitHub. افتح `INSTALL_ASSISTANT_AR.md` لو بتستخدم مساعد، وافتح `state-seed.json` لو بتراجع البنية. ملفا `01-state-engine.json` و`02-clinic-whatsapp.json` للاستيراد في n8n. القيم التالية تتلصق في خلايا جدول الحالة.
+
+| العمود | النوع | قيمة صف البداية |
+|---|---|---|
+| `revision` | Number | `0` |
+| `payload` | String | انسخ سطر JSON التالي كاملًا في خلية واحدة. |
+| `mutation` | String | `initialize` |
+
+```json
+{"schema":1,"counters":{},"sessions":{},"events":{},"visits":{},"next_sheet_row":2}
+```
+
+ده هو **نص payload وحده**. لو فتحت `state-seed.json` هتلاقي ملفًا أكبر بيشرح الجدول وصف البداية، فانسخ قيمة الخلية من السطر الجاهز هنا. عمود `id` المتوقع قيمته `1`، و`id` و`createdAt` و`updatedAt` بيجهزهم n8n تلقائيًا.
 
 [استيراد ملفات n8n](https://docs.n8n.io/workflows/export-import/) · [جداول n8n](https://docs.n8n.io/data/data-tables/)
 
