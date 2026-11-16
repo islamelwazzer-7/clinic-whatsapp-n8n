@@ -1,0 +1,47 @@
+<style>body{direction:rtl;text-align:right}pre,code{direction:ltr;unicode-bidi:embed}table{direction:rtl;width:100%}</style>
+<div dir="rtl">
+
+# سكرتير العيادة على واتساب — C06 `0.1.0-review`
+
+حزمة بروفة تركيب ببيانات وهمية. السكرتير بيرد على الأسعار والمواعيد وبيسجّل زيارة ليوم مفتوح. تأكيد الزيارة يطلع بعد حفظ الصف وقراءته. Telegram اختياري، وEvolution هنا وصلة واتساب غير رسمية. نسخة المراجعة لسه محتاجة تجربة فعلية من الصفر قبل التوزيع.
+
+عندك n8n وEvolution جاهزين؟ ابدأ من الخطوات تحت. لو واحدة ناقصة، افتح [تجهيز البيئة](BOOTSTRAP_AR.md). لو عايز مساعد يمشي معاك، افتح [برومبت التركيب](INSTALL_ASSISTANT_AR.md). الحزمة محتاجة Google Sheets وGemini API، وبتستخدم n8n فيه Data tables. إصدار n8n المعتمد هيتحدد من البروفة.
+
+## ١. n8n — استيراد وتهيئة مرة واحدة
+
+1. في n8n التجريبي، اختار **Import from File** واستورد `01-state-engine.json` ثم `02-clinic-whatsapp.json` في نفس المشروع. خليهُم غير نشطين أثناء الربط.
+2. من **Data tables** اعمل جدول جديد باسم `C06 Public State`. أضف الأعمدة والصف الموجودين في `state-seed.json`. `revision` نوعه Number، و`payload` و`mutation` نوعهم String. `payload` يتلصق كنص JSON. اتأكد إن n8n أعطى الصف الأول `id=1`. التهيئة مرة واحدة لجدول جديد، والشغل الحالي يستكمل من جدوله القائم.
+3. في المحرك اختار جدول `C06 Public State` في **Read State 1–3** و**Save State 1–3**. في الرئيسية اربط الـWorkflow الداخلي في **Begin Direct State** و**Prepare Direct Reply** و**Confirm Visit Sheet Save** و**Claim Telegram** و**Confirm Telegram Delivery** و**Claim WhatsApp** و**Confirm WhatsApp Delivery** و**Release Failed Conversation**. لو المساعد عنده وصول مباشر يقدر يضبط كل المراجع دي دفعة واحدة.
+
+[استيراد ملفات n8n](https://docs.n8n.io/workflows/export-import/) · [جداول n8n](https://docs.n8n.io/data/data-tables/)
+
+## ٢. الشيت
+
+حوّل `clinic-sheet.xlsx` إلى Google Sheets في حساب التجربة. عدّل ملفك وحافظ على أسماء التابات والهيدر. `clinic-sheet.xlsx` بيبدأ بتاب الزيارات فيه الهيدر فقط، والصفوف الجديدة تظهر مباشرة.
+
+| التاب | اللي بيتعدل |
+|---|---|
+| بيانات العيادة | العمود `B` قدام `name` و`address` و`location_url`. سيب `timezone` على `Africa/Cairo` في نسخة الديمو. اللوكيشن اختياري. |
+| الخدمات | معرف خدمة فريد، الاسم، سعر رقمي لو متاح، عملة `EGP`، وصف مختصر، و`active` للتفعيل. عمود المدة اختياري. |
+| ساعات العمل | اسم اليوم، `opens` و`closes` كنص مثل `17:00`، و`open` أو `closed`. |
+| الإجازات | لو فيه استثناء أضف تاريخًا كنص `YYYY-MM-DD` ومواعيد الاستثناء أو `closed`. الاستثناء له أولوية. |
+| الزيارات | سجلات بتتكتب تلقائيًا. خلي الصفوف مرئية وسيب الترتيب الأصلي للصفوف قبل وأثناء التشغيل. |
+
+حط معرّف نسخة الشيت في `Settings → spreadsheet_id`. اربط **Google Sheets OAuth2 API** في **Read Clinic Sheets Direct** و**Save Visit To Google Sheets** و**Read Saved Visit Back** و**Save Notification Status**. حساب Google المفوِّض يحتاج صلاحية تعديل النسخة التجريبية. في الاستضافة الذاتية استخدم اعتماد Google خاص بالبيئة حسب دليل n8n. تأكد من طريقة ربط الاعتماد بعقد HTTP Request على إصدارك قبل تفعيل الديمو. [اعتماد Google](https://docs.n8n.io/integrations/builtin/credentials/google/oauth-single-service/)
+
+## ٣. الاعتمادات وتوجيه واتساب
+
+| الجزء | في n8n | صاحب الحساب يعمل إيه |
+|---|---|---|
+| Gemini | في **Google Gemini API** اختار Header Auth واسمه `x-goog-api-key`. الموديل المقترح في `Settings → google_model` هو `gemini-3.5-flash-lite`. | يحط مفتاح Gemini Developer API جوه الـCredential. |
+| Evolution إرسال | في **Send WhatsApp** استخدم Header Auth اسمه `apikey`. في Settings اضبط `evolution_base_url` و`evolution_instance`. | يربط جلسة اختبار من الموبايل ويحط مفتاح Evolution جوه الـCredential. |
+| Evolution استقبال | في **Evolution Webhook** اربط Header Auth خاص بالاستقبال. Settings فيها `allowlist` بصيغة `digits@s.whatsapp.net` لأرقام الاختبار. | يدخل قيمة الهيدر في n8n وEvolution. جلسة الاختبار تستخدم عنوان Webhook واحد لحدث `MESSAGES_UPSERT`. |
+| Telegram | اختياري. اربط اعتماده في **Send Telegram** و**Send Technical Alert**. اضبط `telegram.enabled` و`telegram.chat_id` عند الاستخدام. | يجهز البوت ووجهة اختبار ويدخل التوكن في الـCredential. |
+
+التعاملات الحية تستخدم بيانات وهمية. استخدم نسخة Workflow جديدة وجدول حالة وشيت وجلسة واتساب مخصصين للتجربة. ينفع تستورد الملفين على n8n الموجود عندك وتربط Evolution الموجود. عند اكتمال الربط، فعّل المحرك ثم الرئيسية بعد فتح `demo_enabled` للرقم المحدد، واضبط في Evolution عنوان **Production Webhook** للجلسة المخصصة. تحقق إن `byEvents` مقفول لو Evolution عندك بيضيف اسم الحدث لمسار الرابط عند تفعيله. [Gemini API](https://ai.google.dev/gemini-api/docs/api-key) · [Evolution](https://github.com/evolution-foundation/evolution-api)
+
+## ٤. أول تجربة
+
+اتبع [خطوات قبول أول زيارة](FIRST_TEST_AR.md). كارت الزيارة بيعرض رقم اليوم وساعات الاستقبال. توقيت الكشف بيتنظم في العيادة. لإيقاف استقبال تجربة واتساب، قفل الـworkflow الرئيسي في n8n، وبعد التأكد إن آخر تنفيذ خلص أوقف توجيه الجلسة التجريبية عند الحاجة.
+
+</div>

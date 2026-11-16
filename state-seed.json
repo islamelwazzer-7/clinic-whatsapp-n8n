@@ -1,0 +1,23 @@
+{
+  "name": "C06 Public State",
+  "rowIdExpected": 1,
+  "columns": [
+    {
+      "name": "revision",
+      "type": "number"
+    },
+    {
+      "name": "payload",
+      "type": "string"
+    },
+    {
+      "name": "mutation",
+      "type": "string"
+    }
+  ],
+  "row": {
+    "revision": 0,
+    "payload": "{\"schema\":1,\"counters\":{},\"sessions\":{},\"events\":{},\"visits\":{},\"next_sheet_row\":2}",
+    "mutation": "initialize"
+  }
+}

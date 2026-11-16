@@ -1,0 +1,882 @@
+{
+  "name": "C06 Public — State Engine",
+  "nodes": [
+    {
+      "id": "51588b4e-5ea3-4eb8-ad6a-191df5af6c9c",
+      "name": "State Request",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "b6a42b32-281c-442f-b602-8bf16ca9aa63",
+      "name": "Return State Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{json:$input.first().json.result}];"
+      }
+    },
+    {
+      "id": "2431b99c-4ce2-4a8b-ae3b-67c96d273cb2",
+      "name": "State Busy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        700
+      ],
+      "parameters": {
+        "jsCode": "throw new Error(\"C06_STATE_BUSY_RETRY_REQUIRED\");"
+      }
+    },
+    {
+      "id": "90215115-106d-4a0b-ba7b-f4f8e70d6c7b",
+      "name": "Read State 1",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        0
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_C06_STATE_TABLE_ID"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": 1
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1
+      }
+    },
+    {
+      "id": "b9a4652f-b025-4a5e-80a4-b4678861cb1c",
+      "name": "Compute State 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        430,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const validateReply=function validateReply(proposal, catalog, {allowVisitConfirmation = false} = {}) {\n  if (typeof proposal === 'string') proposal = JSON.parse(proposal);\n  if (!proposal || typeof proposal.reply !== 'string' || !proposal.reply.trim() ||\n      proposal.reply.length > 2000 || typeof proposal.needs_team !== 'boolean' ||\n      !['information', 'medical', 'visit_request', 'handoff'].includes(proposal.intent)) {\n    throw new Error('INVALID_REPLY');\n  }\n  // Service prices are inserted from the current read, after the agent writes the prose.\n  // A failed match is sent for review instead of substituting the previous service.\n  const active = new Map(catalog.services.map(service => [service.service_id, service]));\n  const placeholders = Array.from(proposal.reply.matchAll(/\\{\\{service:([A-Za-z0-9_-]+)\\}\\}/g));\n  if (placeholders.some(match => !active.has(match[1]))) throw new Error('UNKNOWN_SERVICE');\n  const prose = proposal.reply.replace(/\\{\\{service:[A-Za-z0-9_-]+\\}\\}/g, '');\n  const proseWithoutFacts = prose.replace(/\\{\\{hours:\\d{4}-\\d{2}-\\d{2}\\}\\}|\\{\\{location\\}\\}/g, '');\n  if (/[0-9٠-٩]/.test(proseWithoutFacts) || /جنيه|EGP/i.test(proseWithoutFacts) ||\n      (!allowVisitConfirmation && /تم تسجيل|سجلت زيارتك|رقم الزيارة/i.test(proseWithoutFacts))) {\n    throw new Error('UNVERIFIED_FACT_OR_VISIT');\n  }\n  const arabicDigits = value => String(value).replace(/[0-9]/g, digit => '٠١٢٣٤٥٦٧٨٩'[Number(digit)]);\n  let reply = proposal.reply.replace(/\\{\\{service:([A-Za-z0-9_-]+)\\}\\}/g, (_, id) => {\n    const service = active.get(id);\n    return service.price === null\n      ? service.name + ' سعرها محتاج تأكيد من فريق العيادة'\n      : service.name + ' بـ' + arabicDigits(service.price) + ' جنيه';\n  });\n  reply = reply.replace(/\\{\\{location\\}\\}/g, () =>\n    catalog.clinic.name + '\\n' + catalog.clinic.address +\n    (catalog.clinic.location_url ? '\\n' + catalog.clinic.location_url : '')\n  );\n  reply = reply.replace(/\\{\\{hours:(\\d{4}-\\d{2}-\\d{2})\\}\\}/g, (_, date) => {\n    const day = catalog.calendar?.find(item => item.date === date);\n    if (!day || !day.known) throw new Error('UNKNOWN_DAY');\n    return day.closed ? day.label + ' إجازة' : day.label + '، ' + day.hours;\n  });\n  if (/\\{\\{|\\}\\}/.test(reply)) throw new Error('UNRESOLVED_FACT');\n  return {...proposal, reply};\n};\nconst directTransition=function directTransition(input, request, nowMs, token) {\n  const state = JSON.parse(JSON.stringify(input));\n  if (state.schema !== 1 || !state.counters || !state.sessions || !state.events || !state.visits) throw new Error('INVALID_DIRECT_STATE');\n  const copy = x => JSON.parse(JSON.stringify(x));\n  const fold = x => String(x || '').trim().replace(/\\s+/g, ' ').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/[\\u064b-\\u065fـ]/g, '');\n  const ar = x => String(x).replace(/[0-9]/g, x => '٠١٢٣٤٥٦٧٨٩'[Number(x)]);\n  const stamp = new Date(nowMs).toISOString();\n  const done = (result, write = true) => {\n    if (JSON.stringify(state).length > 2000000) throw new Error('C06_STATE_LIMIT');\n    return {state, result, write};\n  };\n  const getEvent = () => {\n    const ev = state.events[request.event_key];\n    if (!ev) throw new Error('UNKNOWN_DIRECT_EVENT');\n    return ev;\n  };\n  const exportEvent = ev => ({event_key: ev.key, sender: ev.sender, instance: ev.instance, reply: ev.reply || '', visit: ev.visit || null, sheet: ev.sheet || {status: 'not_required'}, telegram: ev.telegram || {status: 'not_required'}, whatsapp: ev.whatsapp || {status: 'pending'}});\n  if (request.op === 'seed') {\n    const headers = request.headers;\n    if (!Array.isArray(headers) || !['request_id','status','visit_reference','payload_json'].every(x => headers.includes(x))) throw new Error('INVALID_LEGACY_HEADERS');\n    if (!Array.isArray(request.rows) || request.rows.length > 500) throw new Error('LEGACY_ROW_LIMIT');\n    let imported = 0;\n    for (const values of request.rows) {\n      if (!values.some(x => x !== '')) continue;\n      const row = Object.fromEntries(headers.map((h,i) => [h, values[i] ?? '']));\n      if (row.status !== 'registered') continue;\n      const old = JSON.parse(row.payload_json);\n      const v = old.visit;\n      if (!v || v.reference !== row.visit_reference || !Number.isSafeInteger(v.number) || v.number < 1 || !/^\\d{4}-\\d{2}-\\d{2}$/.test(v.date) || !/^\\d{8,15}@s\\.whatsapp\\.net$/.test(old.sender)) throw new Error('INVALID_LEGACY_VISIT');\n      state.counters[v.date] = Math.max(state.counters[v.date] || 0, v.number);\n      const entry = {...v, sender: old.sender, instance: old.instance, request_id: old.request_id, session_generation: old.session_generation || 1, imported: true, sheet_saved:true,telegram_status:'unknown'};\n      state.visits[v.reference] = entry;\n      const sessionKey = old.instance + ':' + old.sender;\n      const session = state.sessions[sessionKey] ||= {pending: {}, history: [], active_event: '', generation: 0};\n      if (!session.last_visit || (old.session_generation || 1) >= session.generation) session.last_visit = entry;\n      session.generation = Math.max(session.generation, old.session_generation || 1);\n      imported++;\n    }\n    state.next_sheet_row = Math.max(state.next_sheet_row || 2, request.rows.length + 2);\n    return done({action: 'seeded', imported_visits: imported, next_sheet_row: state.next_sheet_row});\n  }\n  if (request.op === 'begin') {\n    const e = request.event;\n    if (!e || !/^\\d{8,15}@s\\.whatsapp\\.net$/.test(e.sender) || !/^[A-Za-z0-9_.:-]{1,160}$/.test(e.message_id) || !/^[A-Za-z0-9_-]{1,80}$/.test(e.instance) || typeof e.text !== 'string' || e.text.length > 1500) throw new Error('INVALID_DIRECT_EVENT');\n    const key = e.instance + ':' + e.message_id;\n    const sessionKey = e.instance + ':' + e.sender;\n    const session = state.sessions[sessionKey] ||= {pending: {}, history: [], active_event: '', generation: 0};\n    let ev = state.events[key];\n    if (ev && ev.sender !== e.sender) throw new Error('EVENT_SENDER_MISMATCH');\n    if (ev?.phase === 'ready') return done({action: 'deliver', ...exportEvent(ev)}, false);\n    if (ev?.phase === 'done') return done({action: 'ignore'}, false);\n    const busy = state.events[session.active_event];\n    if (busy && busy.key !== key && busy.phase !== 'done' && nowMs - busy.started_ms < 120000) return done({action: 'wait'}, false);\n    if (ev?.phase === 'model_pending' && nowMs - ev.started_ms < 120000) return done({action: 'ignore'}, false);\n    for (const [id, old] of Object.entries(state.events)) if (old.phase === 'done' && nowMs - old.started_ms > 86400000) delete state.events[id];\n    ev = {key, session_key: sessionKey, sender: e.sender, instance: e.instance, message_id: e.message_id, text: e.text, kind: e.kind, phase: 'model_pending', started_ms: nowMs, processing_token: token, created_at: stamp};\n    state.events[key] = ev;\n    session.active_event = key;\n    return done({action: 'model', event_key: key, processing_token: token, conversation: {pending: copy(session.pending), history: copy(session.history), last_visit: copy(session.last_visit || null)}});\n  }\n  const ev = getEvent();\n  const session = state.sessions[ev.session_key];\n  if (request.op === 'prepare') {\n    if (ev.phase === 'ready' || ev.phase === 'done') return done({action: ev.phase === 'done' ? 'ignore' : 'deliver', ...exportEvent(ev)}, false);\n    if (ev.processing_token !== request.processing_token) throw new Error('STALE_MODEL_RESULT');\n    const p = typeof request.proposal === 'string' ? JSON.parse(request.proposal) : request.proposal;\n    if (!p || typeof p.wants_visit !== 'boolean' || typeof p.visit_date !== 'string' || typeof p.patient_name !== 'string' || !Array.isArray(p.service_ids) || p.service_ids.some(x => typeof x !== 'string')) throw new Error('INVALID_DIRECT_PROPOSAL');\n    if (request.medical_guard && (p.intent !== 'medical' || p.needs_team !== true)) throw new Error('MEDICAL_POLICY_REQUIRED');\n    if (['medical','handoff'].includes(p.intent) && !p.needs_team) throw new Error('TEAM_HANDOFF_REQUIRED');\n    if (p.visit_date && p.visit_date !== request.explicit_date && p.visit_date !== session.pending.visit_date) throw new Error('UNVERIFIED_VISIT_DATE');\n    const catalog = request.catalog;\n    if (p.service_ids.some(id => !catalog.services.some(s => s.service_id === id))) throw new Error('UNKNOWN_SERVICE');\n    if (p.wants_visit && p.intent === 'visit_request') {\n      if (request.explicit_date) session.pending.visit_date = request.explicit_date;\n      if (p.visit_date) session.pending.visit_date = p.visit_date;\n      const name = p.patient_name.trim().replace(/\\s+/g,' ');\n      if (name && name !== session.pending.patient_name) {\n        if (name.length < 2 || name.length > 70 || !/^[\\p{L}\\p{M} '\\-]+$/u.test(name) || !fold(ev.text).includes(fold(name)) || /^(تمام|ايوه|نعم|بكره|لا|اكد)$/.test(fold(name))) throw new Error('UNVERIFIED_PATIENT_NAME');\n        session.pending.patient_name = name;\n      }\n      if (p.service_ids.length) session.pending.service_ids = p.service_ids;\n    }\n    const pending = session.pending;\n    const day = catalog.calendar.find(x => x.date === pending.visit_date);\n    const available = day?.known && !day.closed && (day.date > request.local_date || day.periods.some(x => x.end > request.local_minute));\n    const register = p.intent === 'visit_request' && p.wants_visit && available && pending.patient_name;\n    if (register && !p.reply.includes('{{visit}}')) throw new Error('VISIT_RECEIPT_REQUIRED');\n    if (!register && p.reply.includes('{{visit}}')) throw new Error('VISIT_NOT_READY');\n    if (p.needs_team && !p.reply.includes('{{team_status}}')) throw new Error('TEAM_STATUS_PLACEHOLDER_REQUIRED');\n    // Re-render the allowed facts while retaining the two transaction-dependent placeholders.\n    if(p.reply.includes('{{last_visit}}')&&(!session.last_visit||!session.last_visit.sheet_saved))throw new Error('NO_CONFIRMED_PRIOR_VISIT');\n    const sentinels = p.reply.replaceAll('{{visit}}','CLINICVISITPLACEHOLDER').replaceAll('{{team_status}}','CLINICTEAMPLACEHOLDER').replaceAll('{{last_visit}}','CLINICLASTVISITPLACEHOLDER');\n    // The whole reply is withheld until the Sheet write is read back successfully.\n    // A natural confirmation is therefore valid only alongside a verified receipt.\n    let reply = validateReply({...p, reply: sentinels}, catalog, {allowVisitConfirmation:!!register||p.reply.includes('{{last_visit}}')}).reply;\n    let visit = null;\n    if (register) {\n      visit = Object.values(state.visits).find(x => x.sender === ev.sender && x.instance === ev.instance && x.date === pending.visit_date && fold(x.patient_name) === fold(pending.patient_name));\n      if (!visit) {\n        if (Object.keys(state.visits).length >= 500) throw new Error('VISIT_DEMO_LIMIT');\n        const number = (state.counters[pending.visit_date] || 0) + 1;\n        state.counters[pending.visit_date] = number;\n        const reference = pending.visit_date.replaceAll('-','') + '-' + String(number).padStart(3,'0');\n        const lines = ['*تم تسجيل زيارتك يا فندم*','', '👤 الاسم: ' + pending.patient_name,'📅 يوم الزيارة: ' + day.label,'🕔 مواعيد الاستقبال: ' + day.hours,'🔖 رقم الزيارة: ' + ar(String(number).padStart(3,'0')),'', catalog.clinic.visit_policy || 'الرقم مرجع للزيارة، وتنظيم الدخول داخل العيادة.'];\n        if (catalog.clinic.location_url) lines.push('📍 اللوكيشن: ' + catalog.clinic.location_url);\n        session.generation++;\n        visit = {date: pending.visit_date, number, reference, patient_name: pending.patient_name, service_id: (pending.service_ids || [])[0] || '', sender: ev.sender, instance: ev.instance, request_id: 'direct-' + token, session_generation: session.generation, summary: lines.join('\\n'), created_at: stamp, sheet_row: state.next_sheet_row++,sheet_saved:false,telegram_status:request.telegram_enabled?'pending':'disabled'};\n        state.visits[reference] = visit;\n        const legacy = {request_id: visit.request_id, session_id: ev.session_key, session_generation: visit.session_generation, sender: ev.sender, instance: ev.instance, status:'registered', created_at: stamp, updated_at: stamp, pending:{visit_date:visit.date,patient_name:visit.patient_name,service_id:visit.service_id}, events:{}, visit:{date:visit.date,number:visit.number,reference:visit.reference,patient_name:visit.patient_name,service_id:visit.service_id,summary:visit.summary}};\n        ev.sheet = {status:'pending', row:visit.sheet_row, values:[[visit.request_id,'registered',visit.date,visit.number,visit.reference,visit.patient_name,ev.sender.replace('@s.whatsapp.net',''),visit.service_id,'pending',stamp,stamp,JSON.stringify(legacy)]]};\n        ev.telegram = {status:request.telegram_enabled ? 'pending' : 'disabled', text:visit.summary, visit_card:true};\n      }\n      if(!visit.imported&&!visit.sheet_saved&&!ev.sheet){\n        const legacy={request_id:visit.request_id,session_id:ev.session_key,session_generation:visit.session_generation,sender:ev.sender,instance:ev.instance,status:'registered',created_at:visit.created_at,updated_at:stamp,pending:{visit_date:visit.date,patient_name:visit.patient_name,service_id:visit.service_id},events:{},visit:{date:visit.date,number:visit.number,reference:visit.reference,patient_name:visit.patient_name,service_id:visit.service_id,summary:visit.summary}};\n        ev.sheet={status:'pending',row:visit.sheet_row,values:[[visit.request_id,'registered',visit.date,visit.number,visit.reference,visit.patient_name,ev.sender.replace('@s.whatsapp.net',''),visit.service_id,visit.telegram_status||'pending',visit.created_at,stamp,JSON.stringify(legacy)]]};\n      }\n      if(!visit.imported&&visit.telegram_status==='pending'&&!ev.telegram)ev.telegram={status:'pending',text:visit.summary,visit_card:true};\n      session.last_visit = visit;\n      session.pending = {};\n      reply = reply.replaceAll('CLINICVISITPLACEHOLDER', visit.summary);\n    }\n    reply=reply.replaceAll('CLINICLASTVISITPLACEHOLDER',session.last_visit?.summary||'');\n    if (p.needs_team) ev.telegram = {status:request.telegram_enabled ? 'pending' : 'disabled', text:'طلب مراجعة مساعد العيادة. راجع المحادثة الأصلية في واتساب.', visit_card:false};\n    ev.telegram ||= {status:'not_required'};\n    ev.sheet ||= {status:'not_required'};\n    ev.whatsapp = {status:'pending'};\n    ev.visit = visit;\n    ev.reply = reply;\n    ev.phase = 'ready';\n    return done({action:'deliver',...exportEvent(ev)});\n  }\n  if (request.op === 'claim') {\n    if (!['telegram','whatsapp'].includes(request.channel)) throw new Error('INVALID_DELIVERY_CHANNEL');\n    const delivery = ev[request.channel];\n    if (ev.sheet?.status === 'pending') throw new Error('VISIT_NOT_SAVED');\n    if (request.channel === 'whatsapp' && ev.telegram?.status === 'pending') throw new Error('TEAM_NOTIFICATION_NOT_ATTEMPTED');\n    if (delivery?.status !== 'pending') return done({action:'skip',...exportEvent(ev)},false);\n    if(request.channel==='telegram'&&delivery.visit_card&&ev.visit){\n      const v=state.visits[ev.visit.reference];\n      if(v&&v.telegram_status!=='pending'){delivery.status=v.telegram_status||'unknown';return done({action:'skip',...exportEvent(ev)});}\n      if(v)v.telegram_status='sending';\n    }\n    delivery.status = 'sending';\n    delivery.claim_token = token;\n    let text = request.channel === 'telegram' ? delivery.text : ev.reply;\n    text = String(text || '').replaceAll('CLINICTEAMPLACEHOLDER', ev.telegram.status === 'sent' ? 'بلّغت فريق العيادة بطلب حضرتك وهيتواصلوا معاك.' : 'فريق العيادة يقدر يراجع طلب حضرتك، أو أساعدك تسجّل زيارة للكشف.');\n    if (text.includes('CLINICVISITPLACEHOLDER')) throw new Error('UNRESOLVED_VISIT');\n    if(request.channel==='whatsapp') ev.reply=text;\n    return done({action:'send',...exportEvent(ev),delivery:{channel:request.channel,target:request.channel==='whatsapp'?ev.sender:request.telegram_chat_id,text,claim_token:token,visit_card:!!delivery.visit_card}});\n  }\n  if (request.op === 'sheet_ack') {\n    if (ev.sheet?.status !== 'pending') return done({action:'deliver',...exportEvent(ev)},false);\n    if (!request.saved) throw new Error('SHEET_WRITE_UNCONFIRMED');\n    ev.sheet.status='sent';\n    if(ev.visit){ev.visit.sheet_saved=true;state.visits[ev.visit.reference].sheet_saved=true;if(session.last_visit?.reference===ev.visit.reference)session.last_visit.sheet_saved=true;}\n    return done({action:'deliver',...exportEvent(ev)});\n  }\n  if (request.op === 'ack') {\n    const delivery=ev[request.channel];\n    if (!delivery || delivery.claim_token !== request.claim_token) throw new Error('INVALID_DELIVERY_CLAIM');\n    if (delivery.status !== 'sending') return done({action:'deliver',...exportEvent(ev)},false);\n    delivery.status=request.sent===true?'sent':'unknown';\n    delivery.provider_message_id=String(request.provider_message_id||'').slice(0,180);\n    if(request.channel==='telegram'&&delivery.visit_card&&ev.visit)state.visits[ev.visit.reference].telegram_status=delivery.status;\n    if (request.channel==='whatsapp') {\n      ev.phase='done';if(session.active_event===ev.key)session.active_event='';\n      if(request.sent===true)session.history=[...session.history,{role:'user',text:ev.text},{role:'assistant',text:ev.reply}].slice(-12);\n    }\n    return done({action:'deliver',...exportEvent(ev)});\n  }\n  if(request.op==='abort') {\n    if(session.active_event===ev.key)session.active_event='';\n    if(ev.phase==='model_pending')ev.phase='done';\n    return done({action:'aborted'});\n  }\n  throw new Error('UNKNOWN_DIRECT_OPERATION');\n};\nconst request=$('State Request').first().json; const row=$input.first().json;\nif(row.id!==1||!Number.isSafeInteger(row.revision)||typeof row.payload!==\"string\")throw new Error(\"C06_STATE_NOT_INITIALIZED\");\nconst mutation=$execution.id+\":1:\"+Math.random().toString(36).slice(2);\nconst result=directTransition(JSON.parse(row.payload),request,Date.now(),mutation);\nreturn [{json:{write:result.write,result:result.result,previous_revision:row.revision,next_revision:row.revision+1,payload:JSON.stringify(result.state),mutation}}];"
+      }
+    },
+    {
+      "id": "fd55a68f-0ee4-4a0f-b42c-d98551a59bbd",
+      "name": "Needs State Write 1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7eb7e3a0-955a-4d1e-a8e5-f45ac15d5e5d",
+              "leftValue": "={{ $json.write }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3528eac8-e4dc-4a94-bb97-a5652ebc6112",
+      "name": "Save State 1",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        0
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_C06_STATE_TABLE_ID"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": 1
+            },
+            {
+              "keyName": "revision",
+              "condition": "eq",
+              "keyValue": "={{ $json.previous_revision }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "revision": "={{ $json.next_revision }}",
+            "payload": "={{ $json.payload }}",
+            "mutation": "={{ $json.mutation }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "revision",
+              "displayName": "revision",
+              "type": "number",
+              "required": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "type": "string",
+              "required": false
+            },
+            {
+              "id": "mutation",
+              "displayName": "mutation",
+              "type": "string",
+              "required": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "bcf37d0c-447a-4476-8f95-10c34529ba10",
+      "name": "Verify State 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1130,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const expected=$('Compute State 1').first().json;const row=$input.first().json;return [{json:{committed:row.revision===expected.next_revision&&row.mutation===expected.mutation,result:expected.result}}];"
+      }
+    },
+    {
+      "id": "2133bf64-1c9d-4ba1-be89-6136d5db5fa1",
+      "name": "State Committed 1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1370,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5130801f-a7e7-47d2-93ad-13510892c37a",
+              "leftValue": "={{ $json.committed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "e13cefab-635c-483e-a950-ae66b532f4d4",
+      "name": "Read State 2",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_C06_STATE_TABLE_ID"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": 1
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1
+      }
+    },
+    {
+      "id": "3b4783b5-b461-43db-9a32-c5c07c74e535",
+      "name": "Compute State 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        430,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const validateReply=function validateReply(proposal, catalog, {allowVisitConfirmation = false} = {}) {\n  if (typeof proposal === 'string') proposal = JSON.parse(proposal);\n  if (!proposal || typeof proposal.reply !== 'string' || !proposal.reply.trim() ||\n      proposal.reply.length > 2000 || typeof proposal.needs_team !== 'boolean' ||\n      !['information', 'medical', 'visit_request', 'handoff'].includes(proposal.intent)) {\n    throw new Error('INVALID_REPLY');\n  }\n  // Service prices are inserted from the current read, after the agent writes the prose.\n  // A failed match is sent for review instead of substituting the previous service.\n  const active = new Map(catalog.services.map(service => [service.service_id, service]));\n  const placeholders = Array.from(proposal.reply.matchAll(/\\{\\{service:([A-Za-z0-9_-]+)\\}\\}/g));\n  if (placeholders.some(match => !active.has(match[1]))) throw new Error('UNKNOWN_SERVICE');\n  const prose = proposal.reply.replace(/\\{\\{service:[A-Za-z0-9_-]+\\}\\}/g, '');\n  const proseWithoutFacts = prose.replace(/\\{\\{hours:\\d{4}-\\d{2}-\\d{2}\\}\\}|\\{\\{location\\}\\}/g, '');\n  if (/[0-9٠-٩]/.test(proseWithoutFacts) || /جنيه|EGP/i.test(proseWithoutFacts) ||\n      (!allowVisitConfirmation && /تم تسجيل|سجلت زيارتك|رقم الزيارة/i.test(proseWithoutFacts))) {\n    throw new Error('UNVERIFIED_FACT_OR_VISIT');\n  }\n  const arabicDigits = value => String(value).replace(/[0-9]/g, digit => '٠١٢٣٤٥٦٧٨٩'[Number(digit)]);\n  let reply = proposal.reply.replace(/\\{\\{service:([A-Za-z0-9_-]+)\\}\\}/g, (_, id) => {\n    const service = active.get(id);\n    return service.price === null\n      ? service.name + ' سعرها محتاج تأكيد من فريق العيادة'\n      : service.name + ' بـ' + arabicDigits(service.price) + ' جنيه';\n  });\n  reply = reply.replace(/\\{\\{location\\}\\}/g, () =>\n    catalog.clinic.name + '\\n' + catalog.clinic.address +\n    (catalog.clinic.location_url ? '\\n' + catalog.clinic.location_url : '')\n  );\n  reply = reply.replace(/\\{\\{hours:(\\d{4}-\\d{2}-\\d{2})\\}\\}/g, (_, date) => {\n    const day = catalog.calendar?.find(item => item.date === date);\n    if (!day || !day.known) throw new Error('UNKNOWN_DAY');\n    return day.closed ? day.label + ' إجازة' : day.label + '، ' + day.hours;\n  });\n  if (/\\{\\{|\\}\\}/.test(reply)) throw new Error('UNRESOLVED_FACT');\n  return {...proposal, reply};\n};\nconst directTransition=function directTransition(input, request, nowMs, token) {\n  const state = JSON.parse(JSON.stringify(input));\n  if (state.schema !== 1 || !state.counters || !state.sessions || !state.events || !state.visits) throw new Error('INVALID_DIRECT_STATE');\n  const copy = x => JSON.parse(JSON.stringify(x));\n  const fold = x => String(x || '').trim().replace(/\\s+/g, ' ').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/[\\u064b-\\u065fـ]/g, '');\n  const ar = x => String(x).replace(/[0-9]/g, x => '٠١٢٣٤٥٦٧٨٩'[Number(x)]);\n  const stamp = new Date(nowMs).toISOString();\n  const done = (result, write = true) => {\n    if (JSON.stringify(state).length > 2000000) throw new Error('C06_STATE_LIMIT');\n    return {state, result, write};\n  };\n  const getEvent = () => {\n    const ev = state.events[request.event_key];\n    if (!ev) throw new Error('UNKNOWN_DIRECT_EVENT');\n    return ev;\n  };\n  const exportEvent = ev => ({event_key: ev.key, sender: ev.sender, instance: ev.instance, reply: ev.reply || '', visit: ev.visit || null, sheet: ev.sheet || {status: 'not_required'}, telegram: ev.telegram || {status: 'not_required'}, whatsapp: ev.whatsapp || {status: 'pending'}});\n  if (request.op === 'seed') {\n    const headers = request.headers;\n    if (!Array.isArray(headers) || !['request_id','status','visit_reference','payload_json'].every(x => headers.includes(x))) throw new Error('INVALID_LEGACY_HEADERS');\n    if (!Array.isArray(request.rows) || request.rows.length > 500) throw new Error('LEGACY_ROW_LIMIT');\n    let imported = 0;\n    for (const values of request.rows) {\n      if (!values.some(x => x !== '')) continue;\n      const row = Object.fromEntries(headers.map((h,i) => [h, values[i] ?? '']));\n      if (row.status !== 'registered') continue;\n      const old = JSON.parse(row.payload_json);\n      const v = old.visit;\n      if (!v || v.reference !== row.visit_reference || !Number.isSafeInteger(v.number) || v.number < 1 || !/^\\d{4}-\\d{2}-\\d{2}$/.test(v.date) || !/^\\d{8,15}@s\\.whatsapp\\.net$/.test(old.sender)) throw new Error('INVALID_LEGACY_VISIT');\n      state.counters[v.date] = Math.max(state.counters[v.date] || 0, v.number);\n      const entry = {...v, sender: old.sender, instance: old.instance, request_id: old.request_id, session_generation: old.session_generation || 1, imported: true, sheet_saved:true,telegram_status:'unknown'};\n      state.visits[v.reference] = entry;\n      const sessionKey = old.instance + ':' + old.sender;\n      const session = state.sessions[sessionKey] ||= {pending: {}, history: [], active_event: '', generation: 0};\n      if (!session.last_visit || (old.session_generation || 1) >= session.generation) session.last_visit = entry;\n      session.generation = Math.max(session.generation, old.session_generation || 1);\n      imported++;\n    }\n    state.next_sheet_row = Math.max(state.next_sheet_row || 2, request.rows.length + 2);\n    return done({action: 'seeded', imported_visits: imported, next_sheet_row: state.next_sheet_row});\n  }\n  if (request.op === 'begin') {\n    const e = request.event;\n    if (!e || !/^\\d{8,15}@s\\.whatsapp\\.net$/.test(e.sender) || !/^[A-Za-z0-9_.:-]{1,160}$/.test(e.message_id) || !/^[A-Za-z0-9_-]{1,80}$/.test(e.instance) || typeof e.text !== 'string' || e.text.length > 1500) throw new Error('INVALID_DIRECT_EVENT');\n    const key = e.instance + ':' + e.message_id;\n    const sessionKey = e.instance + ':' + e.sender;\n    const session = state.sessions[sessionKey] ||= {pending: {}, history: [], active_event: '', generation: 0};\n    let ev = state.events[key];\n    if (ev && ev.sender !== e.sender) throw new Error('EVENT_SENDER_MISMATCH');\n    if (ev?.phase === 'ready') return done({action: 'deliver', ...exportEvent(ev)}, false);\n    if (ev?.phase === 'done') return done({action: 'ignore'}, false);\n    const busy = state.events[session.active_event];\n    if (busy && busy.key !== key && busy.phase !== 'done' && nowMs - busy.started_ms < 120000) return done({action: 'wait'}, false);\n    if (ev?.phase === 'model_pending' && nowMs - ev.started_ms < 120000) return done({action: 'ignore'}, false);\n    for (const [id, old] of Object.entries(state.events)) if (old.phase === 'done' && nowMs - old.started_ms > 86400000) delete state.events[id];\n    ev = {key, session_key: sessionKey, sender: e.sender, instance: e.instance, message_id: e.message_id, text: e.text, kind: e.kind, phase: 'model_pending', started_ms: nowMs, processing_token: token, created_at: stamp};\n    state.events[key] = ev;\n    session.active_event = key;\n    return done({action: 'model', event_key: key, processing_token: token, conversation: {pending: copy(session.pending), history: copy(session.history), last_visit: copy(session.last_visit || null)}});\n  }\n  const ev = getEvent();\n  const session = state.sessions[ev.session_key];\n  if (request.op === 'prepare') {\n    if (ev.phase === 'ready' || ev.phase === 'done') return done({action: ev.phase === 'done' ? 'ignore' : 'deliver', ...exportEvent(ev)}, false);\n    if (ev.processing_token !== request.processing_token) throw new Error('STALE_MODEL_RESULT');\n    const p = typeof request.proposal === 'string' ? JSON.parse(request.proposal) : request.proposal;\n    if (!p || typeof p.wants_visit !== 'boolean' || typeof p.visit_date !== 'string' || typeof p.patient_name !== 'string' || !Array.isArray(p.service_ids) || p.service_ids.some(x => typeof x !== 'string')) throw new Error('INVALID_DIRECT_PROPOSAL');\n    if (request.medical_guard && (p.intent !== 'medical' || p.needs_team !== true)) throw new Error('MEDICAL_POLICY_REQUIRED');\n    if (['medical','handoff'].includes(p.intent) && !p.needs_team) throw new Error('TEAM_HANDOFF_REQUIRED');\n    if (p.visit_date && p.visit_date !== request.explicit_date && p.visit_date !== session.pending.visit_date) throw new Error('UNVERIFIED_VISIT_DATE');\n    const catalog = request.catalog;\n    if (p.service_ids.some(id => !catalog.services.some(s => s.service_id === id))) throw new Error('UNKNOWN_SERVICE');\n    if (p.wants_visit && p.intent === 'visit_request') {\n      if (request.explicit_date) session.pending.visit_date = request.explicit_date;\n      if (p.visit_date) session.pending.visit_date = p.visit_date;\n      const name = p.patient_name.trim().replace(/\\s+/g,' ');\n      if (name && name !== session.pending.patient_name) {\n        if (name.length < 2 || name.length > 70 || !/^[\\p{L}\\p{M} '\\-]+$/u.test(name) || !fold(ev.text).includes(fold(name)) || /^(تمام|ايوه|نعم|بكره|لا|اكد)$/.test(fold(name))) throw new Error('UNVERIFIED_PATIENT_NAME');\n        session.pending.patient_name = name;\n      }\n      if (p.service_ids.length) session.pending.service_ids = p.service_ids;\n    }\n    const pending = session.pending;\n    const day = catalog.calendar.find(x => x.date === pending.visit_date);\n    const available = day?.known && !day.closed && (day.date > request.local_date || day.periods.some(x => x.end > request.local_minute));\n    const register = p.intent === 'visit_request' && p.wants_visit && available && pending.patient_name;\n    if (register && !p.reply.includes('{{visit}}')) throw new Error('VISIT_RECEIPT_REQUIRED');\n    if (!register && p.reply.includes('{{visit}}')) throw new Error('VISIT_NOT_READY');\n    if (p.needs_team && !p.reply.includes('{{team_status}}')) throw new Error('TEAM_STATUS_PLACEHOLDER_REQUIRED');\n    // Re-render the allowed facts while retaining the two transaction-dependent placeholders.\n    if(p.reply.includes('{{last_visit}}')&&(!session.last_visit||!session.last_visit.sheet_saved))throw new Error('NO_CONFIRMED_PRIOR_VISIT');\n    const sentinels = p.reply.replaceAll('{{visit}}','CLINICVISITPLACEHOLDER').replaceAll('{{team_status}}','CLINICTEAMPLACEHOLDER').replaceAll('{{last_visit}}','CLINICLASTVISITPLACEHOLDER');\n    // The whole reply is withheld until the Sheet write is read back successfully.\n    // A natural confirmation is therefore valid only alongside a verified receipt.\n    let reply = validateReply({...p, reply: sentinels}, catalog, {allowVisitConfirmation:!!register||p.reply.includes('{{last_visit}}')}).reply;\n    let visit = null;\n    if (register) {\n      visit = Object.values(state.visits).find(x => x.sender === ev.sender && x.instance === ev.instance && x.date === pending.visit_date && fold(x.patient_name) === fold(pending.patient_name));\n      if (!visit) {\n        if (Object.keys(state.visits).length >= 500) throw new Error('VISIT_DEMO_LIMIT');\n        const number = (state.counters[pending.visit_date] || 0) + 1;\n        state.counters[pending.visit_date] = number;\n        const reference = pending.visit_date.replaceAll('-','') + '-' + String(number).padStart(3,'0');\n        const lines = ['*تم تسجيل زيارتك يا فندم*','', '👤 الاسم: ' + pending.patient_name,'📅 يوم الزيارة: ' + day.label,'🕔 مواعيد الاستقبال: ' + day.hours,'🔖 رقم الزيارة: ' + ar(String(number).padStart(3,'0')),'', catalog.clinic.visit_policy || 'الرقم مرجع للزيارة، وتنظيم الدخول داخل العيادة.'];\n        if (catalog.clinic.location_url) lines.push('📍 اللوكيشن: ' + catalog.clinic.location_url);\n        session.generation++;\n        visit = {date: pending.visit_date, number, reference, patient_name: pending.patient_name, service_id: (pending.service_ids || [])[0] || '', sender: ev.sender, instance: ev.instance, request_id: 'direct-' + token, session_generation: session.generation, summary: lines.join('\\n'), created_at: stamp, sheet_row: state.next_sheet_row++,sheet_saved:false,telegram_status:request.telegram_enabled?'pending':'disabled'};\n        state.visits[reference] = visit;\n        const legacy = {request_id: visit.request_id, session_id: ev.session_key, session_generation: visit.session_generation, sender: ev.sender, instance: ev.instance, status:'registered', created_at: stamp, updated_at: stamp, pending:{visit_date:visit.date,patient_name:visit.patient_name,service_id:visit.service_id}, events:{}, visit:{date:visit.date,number:visit.number,reference:visit.reference,patient_name:visit.patient_name,service_id:visit.service_id,summary:visit.summary}};\n        ev.sheet = {status:'pending', row:visit.sheet_row, values:[[visit.request_id,'registered',visit.date,visit.number,visit.reference,visit.patient_name,ev.sender.replace('@s.whatsapp.net',''),visit.service_id,'pending',stamp,stamp,JSON.stringify(legacy)]]};\n        ev.telegram = {status:request.telegram_enabled ? 'pending' : 'disabled', text:visit.summary, visit_card:true};\n      }\n      if(!visit.imported&&!visit.sheet_saved&&!ev.sheet){\n        const legacy={request_id:visit.request_id,session_id:ev.session_key,session_generation:visit.session_generation,sender:ev.sender,instance:ev.instance,status:'registered',created_at:visit.created_at,updated_at:stamp,pending:{visit_date:visit.date,patient_name:visit.patient_name,service_id:visit.service_id},events:{},visit:{date:visit.date,number:visit.number,reference:visit.reference,patient_name:visit.patient_name,service_id:visit.service_id,summary:visit.summary}};\n        ev.sheet={status:'pending',row:visit.sheet_row,values:[[visit.request_id,'registered',visit.date,visit.number,visit.reference,visit.patient_name,ev.sender.replace('@s.whatsapp.net',''),visit.service_id,visit.telegram_status||'pending',visit.created_at,stamp,JSON.stringify(legacy)]]};\n      }\n      if(!visit.imported&&visit.telegram_status==='pending'&&!ev.telegram)ev.telegram={status:'pending',text:visit.summary,visit_card:true};\n      session.last_visit = visit;\n      session.pending = {};\n      reply = reply.replaceAll('CLINICVISITPLACEHOLDER', visit.summary);\n    }\n    reply=reply.replaceAll('CLINICLASTVISITPLACEHOLDER',session.last_visit?.summary||'');\n    if (p.needs_team) ev.telegram = {status:request.telegram_enabled ? 'pending' : 'disabled', text:'طلب مراجعة مساعد العيادة. راجع المحادثة الأصلية في واتساب.', visit_card:false};\n    ev.telegram ||= {status:'not_required'};\n    ev.sheet ||= {status:'not_required'};\n    ev.whatsapp = {status:'pending'};\n    ev.visit = visit;\n    ev.reply = reply;\n    ev.phase = 'ready';\n    return done({action:'deliver',...exportEvent(ev)});\n  }\n  if (request.op === 'claim') {\n    if (!['telegram','whatsapp'].includes(request.channel)) throw new Error('INVALID_DELIVERY_CHANNEL');\n    const delivery = ev[request.channel];\n    if (ev.sheet?.status === 'pending') throw new Error('VISIT_NOT_SAVED');\n    if (request.channel === 'whatsapp' && ev.telegram?.status === 'pending') throw new Error('TEAM_NOTIFICATION_NOT_ATTEMPTED');\n    if (delivery?.status !== 'pending') return done({action:'skip',...exportEvent(ev)},false);\n    if(request.channel==='telegram'&&delivery.visit_card&&ev.visit){\n      const v=state.visits[ev.visit.reference];\n      if(v&&v.telegram_status!=='pending'){delivery.status=v.telegram_status||'unknown';return done({action:'skip',...exportEvent(ev)});}\n      if(v)v.telegram_status='sending';\n    }\n    delivery.status = 'sending';\n    delivery.claim_token = token;\n    let text = request.channel === 'telegram' ? delivery.text : ev.reply;\n    text = String(text || '').replaceAll('CLINICTEAMPLACEHOLDER', ev.telegram.status === 'sent' ? 'بلّغت فريق العيادة بطلب حضرتك وهيتواصلوا معاك.' : 'فريق العيادة يقدر يراجع طلب حضرتك، أو أساعدك تسجّل زيارة للكشف.');\n    if (text.includes('CLINICVISITPLACEHOLDER')) throw new Error('UNRESOLVED_VISIT');\n    if(request.channel==='whatsapp') ev.reply=text;\n    return done({action:'send',...exportEvent(ev),delivery:{channel:request.channel,target:request.channel==='whatsapp'?ev.sender:request.telegram_chat_id,text,claim_token:token,visit_card:!!delivery.visit_card}});\n  }\n  if (request.op === 'sheet_ack') {\n    if (ev.sheet?.status !== 'pending') return done({action:'deliver',...exportEvent(ev)},false);\n    if (!request.saved) throw new Error('SHEET_WRITE_UNCONFIRMED');\n    ev.sheet.status='sent';\n    if(ev.visit){ev.visit.sheet_saved=true;state.visits[ev.visit.reference].sheet_saved=true;if(session.last_visit?.reference===ev.visit.reference)session.last_visit.sheet_saved=true;}\n    return done({action:'deliver',...exportEvent(ev)});\n  }\n  if (request.op === 'ack') {\n    const delivery=ev[request.channel];\n    if (!delivery || delivery.claim_token !== request.claim_token) throw new Error('INVALID_DELIVERY_CLAIM');\n    if (delivery.status !== 'sending') return done({action:'deliver',...exportEvent(ev)},false);\n    delivery.status=request.sent===true?'sent':'unknown';\n    delivery.provider_message_id=String(request.provider_message_id||'').slice(0,180);\n    if(request.channel==='telegram'&&delivery.visit_card&&ev.visit)state.visits[ev.visit.reference].telegram_status=delivery.status;\n    if (request.channel==='whatsapp') {\n      ev.phase='done';if(session.active_event===ev.key)session.active_event='';\n      if(request.sent===true)session.history=[...session.history,{role:'user',text:ev.text},{role:'assistant',text:ev.reply}].slice(-12);\n    }\n    return done({action:'deliver',...exportEvent(ev)});\n  }\n  if(request.op==='abort') {\n    if(session.active_event===ev.key)session.active_event='';\n    if(ev.phase==='model_pending')ev.phase='done';\n    return done({action:'aborted'});\n  }\n  throw new Error('UNKNOWN_DIRECT_OPERATION');\n};\nconst request=$('State Request').first().json; const row=$input.first().json;\nif(row.id!==1||!Number.isSafeInteger(row.revision)||typeof row.payload!==\"string\")throw new Error(\"C06_STATE_NOT_INITIALIZED\");\nconst mutation=$execution.id+\":2:\"+Math.random().toString(36).slice(2);\nconst result=directTransition(JSON.parse(row.payload),request,Date.now(),mutation);\nreturn [{json:{write:result.write,result:result.result,previous_revision:row.revision,next_revision:row.revision+1,payload:JSON.stringify(result.state),mutation}}];"
+      }
+    },
+    {
+      "id": "0bf3cac1-619d-4349-a174-477824023521",
+      "name": "Needs State Write 2",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "f4d8b2c9-6281-424f-85f2-0c3644047a18",
+              "leftValue": "={{ $json.write }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "60fca877-046f-4f9f-b45d-9afa6de5895e",
+      "name": "Save State 2",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        300
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_C06_STATE_TABLE_ID"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": 1
+            },
+            {
+              "keyName": "revision",
+              "condition": "eq",
+              "keyValue": "={{ $json.previous_revision }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "revision": "={{ $json.next_revision }}",
+            "payload": "={{ $json.payload }}",
+            "mutation": "={{ $json.mutation }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "revision",
+              "displayName": "revision",
+              "type": "number",
+              "required": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "type": "string",
+              "required": false
+            },
+            {
+              "id": "mutation",
+              "displayName": "mutation",
+              "type": "string",
+              "required": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "60b15b26-9f7a-46b2-9c62-0bf9560afa85",
+      "name": "Verify State 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1130,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const expected=$('Compute State 2').first().json;const row=$input.first().json;return [{json:{committed:row.revision===expected.next_revision&&row.mutation===expected.mutation,result:expected.result}}];"
+      }
+    },
+    {
+      "id": "3ccb627a-dea4-41d9-bf9c-38ded656a516",
+      "name": "State Committed 2",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1370,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0b47dacc-7a45-471d-9934-c6f389ee9673",
+              "leftValue": "={{ $json.committed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "778ab07e-42b6-4140-b922-5284de96f212",
+      "name": "Read State 3",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        600
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_C06_STATE_TABLE_ID"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": 1
+            }
+          ]
+        },
+        "returnAll": false,
+        "limit": 1
+      }
+    },
+    {
+      "id": "5d6e43be-f41e-43ec-9c82-9bf67916f68b",
+      "name": "Compute State 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        430,
+        600
+      ],
+      "parameters": {
+        "jsCode": "const validateReply=function validateReply(proposal, catalog, {allowVisitConfirmation = false} = {}) {\n  if (typeof proposal === 'string') proposal = JSON.parse(proposal);\n  if (!proposal || typeof proposal.reply !== 'string' || !proposal.reply.trim() ||\n      proposal.reply.length > 2000 || typeof proposal.needs_team !== 'boolean' ||\n      !['information', 'medical', 'visit_request', 'handoff'].includes(proposal.intent)) {\n    throw new Error('INVALID_REPLY');\n  }\n  // Service prices are inserted from the current read, after the agent writes the prose.\n  // A failed match is sent for review instead of substituting the previous service.\n  const active = new Map(catalog.services.map(service => [service.service_id, service]));\n  const placeholders = Array.from(proposal.reply.matchAll(/\\{\\{service:([A-Za-z0-9_-]+)\\}\\}/g));\n  if (placeholders.some(match => !active.has(match[1]))) throw new Error('UNKNOWN_SERVICE');\n  const prose = proposal.reply.replace(/\\{\\{service:[A-Za-z0-9_-]+\\}\\}/g, '');\n  const proseWithoutFacts = prose.replace(/\\{\\{hours:\\d{4}-\\d{2}-\\d{2}\\}\\}|\\{\\{location\\}\\}/g, '');\n  if (/[0-9٠-٩]/.test(proseWithoutFacts) || /جنيه|EGP/i.test(proseWithoutFacts) ||\n      (!allowVisitConfirmation && /تم تسجيل|سجلت زيارتك|رقم الزيارة/i.test(proseWithoutFacts))) {\n    throw new Error('UNVERIFIED_FACT_OR_VISIT');\n  }\n  const arabicDigits = value => String(value).replace(/[0-9]/g, digit => '٠١٢٣٤٥٦٧٨٩'[Number(digit)]);\n  let reply = proposal.reply.replace(/\\{\\{service:([A-Za-z0-9_-]+)\\}\\}/g, (_, id) => {\n    const service = active.get(id);\n    return service.price === null\n      ? service.name + ' سعرها محتاج تأكيد من فريق العيادة'\n      : service.name + ' بـ' + arabicDigits(service.price) + ' جنيه';\n  });\n  reply = reply.replace(/\\{\\{location\\}\\}/g, () =>\n    catalog.clinic.name + '\\n' + catalog.clinic.address +\n    (catalog.clinic.location_url ? '\\n' + catalog.clinic.location_url : '')\n  );\n  reply = reply.replace(/\\{\\{hours:(\\d{4}-\\d{2}-\\d{2})\\}\\}/g, (_, date) => {\n    const day = catalog.calendar?.find(item => item.date === date);\n    if (!day || !day.known) throw new Error('UNKNOWN_DAY');\n    return day.closed ? day.label + ' إجازة' : day.label + '، ' + day.hours;\n  });\n  if (/\\{\\{|\\}\\}/.test(reply)) throw new Error('UNRESOLVED_FACT');\n  return {...proposal, reply};\n};\nconst directTransition=function directTransition(input, request, nowMs, token) {\n  const state = JSON.parse(JSON.stringify(input));\n  if (state.schema !== 1 || !state.counters || !state.sessions || !state.events || !state.visits) throw new Error('INVALID_DIRECT_STATE');\n  const copy = x => JSON.parse(JSON.stringify(x));\n  const fold = x => String(x || '').trim().replace(/\\s+/g, ' ').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/[\\u064b-\\u065fـ]/g, '');\n  const ar = x => String(x).replace(/[0-9]/g, x => '٠١٢٣٤٥٦٧٨٩'[Number(x)]);\n  const stamp = new Date(nowMs).toISOString();\n  const done = (result, write = true) => {\n    if (JSON.stringify(state).length > 2000000) throw new Error('C06_STATE_LIMIT');\n    return {state, result, write};\n  };\n  const getEvent = () => {\n    const ev = state.events[request.event_key];\n    if (!ev) throw new Error('UNKNOWN_DIRECT_EVENT');\n    return ev;\n  };\n  const exportEvent = ev => ({event_key: ev.key, sender: ev.sender, instance: ev.instance, reply: ev.reply || '', visit: ev.visit || null, sheet: ev.sheet || {status: 'not_required'}, telegram: ev.telegram || {status: 'not_required'}, whatsapp: ev.whatsapp || {status: 'pending'}});\n  if (request.op === 'seed') {\n    const headers = request.headers;\n    if (!Array.isArray(headers) || !['request_id','status','visit_reference','payload_json'].every(x => headers.includes(x))) throw new Error('INVALID_LEGACY_HEADERS');\n    if (!Array.isArray(request.rows) || request.rows.length > 500) throw new Error('LEGACY_ROW_LIMIT');\n    let imported = 0;\n    for (const values of request.rows) {\n      if (!values.some(x => x !== '')) continue;\n      const row = Object.fromEntries(headers.map((h,i) => [h, values[i] ?? '']));\n      if (row.status !== 'registered') continue;\n      const old = JSON.parse(row.payload_json);\n      const v = old.visit;\n      if (!v || v.reference !== row.visit_reference || !Number.isSafeInteger(v.number) || v.number < 1 || !/^\\d{4}-\\d{2}-\\d{2}$/.test(v.date) || !/^\\d{8,15}@s\\.whatsapp\\.net$/.test(old.sender)) throw new Error('INVALID_LEGACY_VISIT');\n      state.counters[v.date] = Math.max(state.counters[v.date] || 0, v.number);\n      const entry = {...v, sender: old.sender, instance: old.instance, request_id: old.request_id, session_generation: old.session_generation || 1, imported: true, sheet_saved:true,telegram_status:'unknown'};\n      state.visits[v.reference] = entry;\n      const sessionKey = old.instance + ':' + old.sender;\n      const session = state.sessions[sessionKey] ||= {pending: {}, history: [], active_event: '', generation: 0};\n      if (!session.last_visit || (old.session_generation || 1) >= session.generation) session.last_visit = entry;\n      session.generation = Math.max(session.generation, old.session_generation || 1);\n      imported++;\n    }\n    state.next_sheet_row = Math.max(state.next_sheet_row || 2, request.rows.length + 2);\n    return done({action: 'seeded', imported_visits: imported, next_sheet_row: state.next_sheet_row});\n  }\n  if (request.op === 'begin') {\n    const e = request.event;\n    if (!e || !/^\\d{8,15}@s\\.whatsapp\\.net$/.test(e.sender) || !/^[A-Za-z0-9_.:-]{1,160}$/.test(e.message_id) || !/^[A-Za-z0-9_-]{1,80}$/.test(e.instance) || typeof e.text !== 'string' || e.text.length > 1500) throw new Error('INVALID_DIRECT_EVENT');\n    const key = e.instance + ':' + e.message_id;\n    const sessionKey = e.instance + ':' + e.sender;\n    const session = state.sessions[sessionKey] ||= {pending: {}, history: [], active_event: '', generation: 0};\n    let ev = state.events[key];\n    if (ev && ev.sender !== e.sender) throw new Error('EVENT_SENDER_MISMATCH');\n    if (ev?.phase === 'ready') return done({action: 'deliver', ...exportEvent(ev)}, false);\n    if (ev?.phase === 'done') return done({action: 'ignore'}, false);\n    const busy = state.events[session.active_event];\n    if (busy && busy.key !== key && busy.phase !== 'done' && nowMs - busy.started_ms < 120000) return done({action: 'wait'}, false);\n    if (ev?.phase === 'model_pending' && nowMs - ev.started_ms < 120000) return done({action: 'ignore'}, false);\n    for (const [id, old] of Object.entries(state.events)) if (old.phase === 'done' && nowMs - old.started_ms > 86400000) delete state.events[id];\n    ev = {key, session_key: sessionKey, sender: e.sender, instance: e.instance, message_id: e.message_id, text: e.text, kind: e.kind, phase: 'model_pending', started_ms: nowMs, processing_token: token, created_at: stamp};\n    state.events[key] = ev;\n    session.active_event = key;\n    return done({action: 'model', event_key: key, processing_token: token, conversation: {pending: copy(session.pending), history: copy(session.history), last_visit: copy(session.last_visit || null)}});\n  }\n  const ev = getEvent();\n  const session = state.sessions[ev.session_key];\n  if (request.op === 'prepare') {\n    if (ev.phase === 'ready' || ev.phase === 'done') return done({action: ev.phase === 'done' ? 'ignore' : 'deliver', ...exportEvent(ev)}, false);\n    if (ev.processing_token !== request.processing_token) throw new Error('STALE_MODEL_RESULT');\n    const p = typeof request.proposal === 'string' ? JSON.parse(request.proposal) : request.proposal;\n    if (!p || typeof p.wants_visit !== 'boolean' || typeof p.visit_date !== 'string' || typeof p.patient_name !== 'string' || !Array.isArray(p.service_ids) || p.service_ids.some(x => typeof x !== 'string')) throw new Error('INVALID_DIRECT_PROPOSAL');\n    if (request.medical_guard && (p.intent !== 'medical' || p.needs_team !== true)) throw new Error('MEDICAL_POLICY_REQUIRED');\n    if (['medical','handoff'].includes(p.intent) && !p.needs_team) throw new Error('TEAM_HANDOFF_REQUIRED');\n    if (p.visit_date && p.visit_date !== request.explicit_date && p.visit_date !== session.pending.visit_date) throw new Error('UNVERIFIED_VISIT_DATE');\n    const catalog = request.catalog;\n    if (p.service_ids.some(id => !catalog.services.some(s => s.service_id === id))) throw new Error('UNKNOWN_SERVICE');\n    if (p.wants_visit && p.intent === 'visit_request') {\n      if (request.explicit_date) session.pending.visit_date = request.explicit_date;\n      if (p.visit_date) session.pending.visit_date = p.visit_date;\n      const name = p.patient_name.trim().replace(/\\s+/g,' ');\n      if (name && name !== session.pending.patient_name) {\n        if (name.length < 2 || name.length > 70 || !/^[\\p{L}\\p{M} '\\-]+$/u.test(name) || !fold(ev.text).includes(fold(name)) || /^(تمام|ايوه|نعم|بكره|لا|اكد)$/.test(fold(name))) throw new Error('UNVERIFIED_PATIENT_NAME');\n        session.pending.patient_name = name;\n      }\n      if (p.service_ids.length) session.pending.service_ids = p.service_ids;\n    }\n    const pending = session.pending;\n    const day = catalog.calendar.find(x => x.date === pending.visit_date);\n    const available = day?.known && !day.closed && (day.date > request.local_date || day.periods.some(x => x.end > request.local_minute));\n    const register = p.intent === 'visit_request' && p.wants_visit && available && pending.patient_name;\n    if (register && !p.reply.includes('{{visit}}')) throw new Error('VISIT_RECEIPT_REQUIRED');\n    if (!register && p.reply.includes('{{visit}}')) throw new Error('VISIT_NOT_READY');\n    if (p.needs_team && !p.reply.includes('{{team_status}}')) throw new Error('TEAM_STATUS_PLACEHOLDER_REQUIRED');\n    // Re-render the allowed facts while retaining the two transaction-dependent placeholders.\n    if(p.reply.includes('{{last_visit}}')&&(!session.last_visit||!session.last_visit.sheet_saved))throw new Error('NO_CONFIRMED_PRIOR_VISIT');\n    const sentinels = p.reply.replaceAll('{{visit}}','CLINICVISITPLACEHOLDER').replaceAll('{{team_status}}','CLINICTEAMPLACEHOLDER').replaceAll('{{last_visit}}','CLINICLASTVISITPLACEHOLDER');\n    // The whole reply is withheld until the Sheet write is read back successfully.\n    // A natural confirmation is therefore valid only alongside a verified receipt.\n    let reply = validateReply({...p, reply: sentinels}, catalog, {allowVisitConfirmation:!!register||p.reply.includes('{{last_visit}}')}).reply;\n    let visit = null;\n    if (register) {\n      visit = Object.values(state.visits).find(x => x.sender === ev.sender && x.instance === ev.instance && x.date === pending.visit_date && fold(x.patient_name) === fold(pending.patient_name));\n      if (!visit) {\n        if (Object.keys(state.visits).length >= 500) throw new Error('VISIT_DEMO_LIMIT');\n        const number = (state.counters[pending.visit_date] || 0) + 1;\n        state.counters[pending.visit_date] = number;\n        const reference = pending.visit_date.replaceAll('-','') + '-' + String(number).padStart(3,'0');\n        const lines = ['*تم تسجيل زيارتك يا فندم*','', '👤 الاسم: ' + pending.patient_name,'📅 يوم الزيارة: ' + day.label,'🕔 مواعيد الاستقبال: ' + day.hours,'🔖 رقم الزيارة: ' + ar(String(number).padStart(3,'0')),'', catalog.clinic.visit_policy || 'الرقم مرجع للزيارة، وتنظيم الدخول داخل العيادة.'];\n        if (catalog.clinic.location_url) lines.push('📍 اللوكيشن: ' + catalog.clinic.location_url);\n        session.generation++;\n        visit = {date: pending.visit_date, number, reference, patient_name: pending.patient_name, service_id: (pending.service_ids || [])[0] || '', sender: ev.sender, instance: ev.instance, request_id: 'direct-' + token, session_generation: session.generation, summary: lines.join('\\n'), created_at: stamp, sheet_row: state.next_sheet_row++,sheet_saved:false,telegram_status:request.telegram_enabled?'pending':'disabled'};\n        state.visits[reference] = visit;\n        const legacy = {request_id: visit.request_id, session_id: ev.session_key, session_generation: visit.session_generation, sender: ev.sender, instance: ev.instance, status:'registered', created_at: stamp, updated_at: stamp, pending:{visit_date:visit.date,patient_name:visit.patient_name,service_id:visit.service_id}, events:{}, visit:{date:visit.date,number:visit.number,reference:visit.reference,patient_name:visit.patient_name,service_id:visit.service_id,summary:visit.summary}};\n        ev.sheet = {status:'pending', row:visit.sheet_row, values:[[visit.request_id,'registered',visit.date,visit.number,visit.reference,visit.patient_name,ev.sender.replace('@s.whatsapp.net',''),visit.service_id,'pending',stamp,stamp,JSON.stringify(legacy)]]};\n        ev.telegram = {status:request.telegram_enabled ? 'pending' : 'disabled', text:visit.summary, visit_card:true};\n      }\n      if(!visit.imported&&!visit.sheet_saved&&!ev.sheet){\n        const legacy={request_id:visit.request_id,session_id:ev.session_key,session_generation:visit.session_generation,sender:ev.sender,instance:ev.instance,status:'registered',created_at:visit.created_at,updated_at:stamp,pending:{visit_date:visit.date,patient_name:visit.patient_name,service_id:visit.service_id},events:{},visit:{date:visit.date,number:visit.number,reference:visit.reference,patient_name:visit.patient_name,service_id:visit.service_id,summary:visit.summary}};\n        ev.sheet={status:'pending',row:visit.sheet_row,values:[[visit.request_id,'registered',visit.date,visit.number,visit.reference,visit.patient_name,ev.sender.replace('@s.whatsapp.net',''),visit.service_id,visit.telegram_status||'pending',visit.created_at,stamp,JSON.stringify(legacy)]]};\n      }\n      if(!visit.imported&&visit.telegram_status==='pending'&&!ev.telegram)ev.telegram={status:'pending',text:visit.summary,visit_card:true};\n      session.last_visit = visit;\n      session.pending = {};\n      reply = reply.replaceAll('CLINICVISITPLACEHOLDER', visit.summary);\n    }\n    reply=reply.replaceAll('CLINICLASTVISITPLACEHOLDER',session.last_visit?.summary||'');\n    if (p.needs_team) ev.telegram = {status:request.telegram_enabled ? 'pending' : 'disabled', text:'طلب مراجعة مساعد العيادة. راجع المحادثة الأصلية في واتساب.', visit_card:false};\n    ev.telegram ||= {status:'not_required'};\n    ev.sheet ||= {status:'not_required'};\n    ev.whatsapp = {status:'pending'};\n    ev.visit = visit;\n    ev.reply = reply;\n    ev.phase = 'ready';\n    return done({action:'deliver',...exportEvent(ev)});\n  }\n  if (request.op === 'claim') {\n    if (!['telegram','whatsapp'].includes(request.channel)) throw new Error('INVALID_DELIVERY_CHANNEL');\n    const delivery = ev[request.channel];\n    if (ev.sheet?.status === 'pending') throw new Error('VISIT_NOT_SAVED');\n    if (request.channel === 'whatsapp' && ev.telegram?.status === 'pending') throw new Error('TEAM_NOTIFICATION_NOT_ATTEMPTED');\n    if (delivery?.status !== 'pending') return done({action:'skip',...exportEvent(ev)},false);\n    if(request.channel==='telegram'&&delivery.visit_card&&ev.visit){\n      const v=state.visits[ev.visit.reference];\n      if(v&&v.telegram_status!=='pending'){delivery.status=v.telegram_status||'unknown';return done({action:'skip',...exportEvent(ev)});}\n      if(v)v.telegram_status='sending';\n    }\n    delivery.status = 'sending';\n    delivery.claim_token = token;\n    let text = request.channel === 'telegram' ? delivery.text : ev.reply;\n    text = String(text || '').replaceAll('CLINICTEAMPLACEHOLDER', ev.telegram.status === 'sent' ? 'بلّغت فريق العيادة بطلب حضرتك وهيتواصلوا معاك.' : 'فريق العيادة يقدر يراجع طلب حضرتك، أو أساعدك تسجّل زيارة للكشف.');\n    if (text.includes('CLINICVISITPLACEHOLDER')) throw new Error('UNRESOLVED_VISIT');\n    if(request.channel==='whatsapp') ev.reply=text;\n    return done({action:'send',...exportEvent(ev),delivery:{channel:request.channel,target:request.channel==='whatsapp'?ev.sender:request.telegram_chat_id,text,claim_token:token,visit_card:!!delivery.visit_card}});\n  }\n  if (request.op === 'sheet_ack') {\n    if (ev.sheet?.status !== 'pending') return done({action:'deliver',...exportEvent(ev)},false);\n    if (!request.saved) throw new Error('SHEET_WRITE_UNCONFIRMED');\n    ev.sheet.status='sent';\n    if(ev.visit){ev.visit.sheet_saved=true;state.visits[ev.visit.reference].sheet_saved=true;if(session.last_visit?.reference===ev.visit.reference)session.last_visit.sheet_saved=true;}\n    return done({action:'deliver',...exportEvent(ev)});\n  }\n  if (request.op === 'ack') {\n    const delivery=ev[request.channel];\n    if (!delivery || delivery.claim_token !== request.claim_token) throw new Error('INVALID_DELIVERY_CLAIM');\n    if (delivery.status !== 'sending') return done({action:'deliver',...exportEvent(ev)},false);\n    delivery.status=request.sent===true?'sent':'unknown';\n    delivery.provider_message_id=String(request.provider_message_id||'').slice(0,180);\n    if(request.channel==='telegram'&&delivery.visit_card&&ev.visit)state.visits[ev.visit.reference].telegram_status=delivery.status;\n    if (request.channel==='whatsapp') {\n      ev.phase='done';if(session.active_event===ev.key)session.active_event='';\n      if(request.sent===true)session.history=[...session.history,{role:'user',text:ev.text},{role:'assistant',text:ev.reply}].slice(-12);\n    }\n    return done({action:'deliver',...exportEvent(ev)});\n  }\n  if(request.op==='abort') {\n    if(session.active_event===ev.key)session.active_event='';\n    if(ev.phase==='model_pending')ev.phase='done';\n    return done({action:'aborted'});\n  }\n  throw new Error('UNKNOWN_DIRECT_OPERATION');\n};\nconst request=$('State Request').first().json; const row=$input.first().json;\nif(row.id!==1||!Number.isSafeInteger(row.revision)||typeof row.payload!==\"string\")throw new Error(\"C06_STATE_NOT_INITIALIZED\");\nconst mutation=$execution.id+\":3:\"+Math.random().toString(36).slice(2);\nconst result=directTransition(JSON.parse(row.payload),request,Date.now(),mutation);\nreturn [{json:{write:result.write,result:result.result,previous_revision:row.revision,next_revision:row.revision+1,payload:JSON.stringify(result.state),mutation}}];"
+      }
+    },
+    {
+      "id": "44ee5e25-71f4-4cec-8d72-d3971dd9dca2",
+      "name": "Needs State Write 3",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4fb91f17-f468-462d-bccb-8a007e07510a",
+              "leftValue": "={{ $json.write }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3f81791c-f49b-4cbc-800b-0953966487a3",
+      "name": "Save State 3",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        600
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_C06_STATE_TABLE_ID"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": 1
+            },
+            {
+              "keyName": "revision",
+              "condition": "eq",
+              "keyValue": "={{ $json.previous_revision }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "revision": "={{ $json.next_revision }}",
+            "payload": "={{ $json.payload }}",
+            "mutation": "={{ $json.mutation }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "revision",
+              "displayName": "revision",
+              "type": "number",
+              "required": false
+            },
+            {
+              "id": "payload",
+              "displayName": "payload",
+              "type": "string",
+              "required": false
+            },
+            {
+              "id": "mutation",
+              "displayName": "mutation",
+              "type": "string",
+              "required": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "1fb32bd8-58dd-4e3d-8a05-94a062c19d3b",
+      "name": "Verify State 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1130,
+        600
+      ],
+      "parameters": {
+        "jsCode": "const expected=$('Compute State 3').first().json;const row=$input.first().json;return [{json:{committed:row.revision===expected.next_revision&&row.mutation===expected.mutation,result:expected.result}}];"
+      }
+    },
+    {
+      "id": "06d4fdd4-79d9-4946-ac03-b5794ec18d0c",
+      "name": "State Committed 3",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1370,
+        600
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "47733bfe-3df8-4802-ad81-c5dc32d2e98d",
+              "leftValue": "={{ $json.committed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "State Request": {
+      "main": [
+        [
+          {
+            "node": "Read State 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read State 1": {
+      "main": [
+        [
+          {
+            "node": "Compute State 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute State 1": {
+      "main": [
+        [
+          {
+            "node": "Needs State Write 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs State Write 1": {
+      "main": [
+        [
+          {
+            "node": "Save State 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return State Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save State 1": {
+      "main": [
+        [
+          {
+            "node": "Verify State 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify State 1": {
+      "main": [
+        [
+          {
+            "node": "State Committed 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Committed 1": {
+      "main": [
+        [
+          {
+            "node": "Return State Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read State 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read State 2": {
+      "main": [
+        [
+          {
+            "node": "Compute State 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute State 2": {
+      "main": [
+        [
+          {
+            "node": "Needs State Write 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs State Write 2": {
+      "main": [
+        [
+          {
+            "node": "Save State 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return State Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save State 2": {
+      "main": [
+        [
+          {
+            "node": "Verify State 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify State 2": {
+      "main": [
+        [
+          {
+            "node": "State Committed 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Committed 2": {
+      "main": [
+        [
+          {
+            "node": "Return State Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read State 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read State 3": {
+      "main": [
+        [
+          {
+            "node": "Compute State 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute State 3": {
+      "main": [
+        [
+          {
+            "node": "Needs State Write 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs State Write 3": {
+      "main": [
+        [
+          {
+            "node": "Save State 3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return State Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save State 3": {
+      "main": [
+        [
+          {
+            "node": "Verify State 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify State 3": {
+      "main": [
+        [
+          {
+            "node": "State Committed 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Committed 3": {
+      "main": [
+        [
+          {
+            "node": "Return State Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "State Busy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 30,
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false
+  },
+  "tags": []
+}

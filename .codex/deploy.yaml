@@ -1,0 +1,20 @@
+schema: engez.codex.deploy/v1
+
+project:
+  slug: clinic-whatsapp-n8n
+  repository: https://github.com/islamelwazzer-7/clinic-whatsapp-n8n.git
+  visibility: public
+  default_branch: main
+
+server: null
+
+release:
+  strategy: github-release
+  version: v0.1.0-review
+  prerelease: true
+  runtime_verification: pending
+
+constraints:
+  secrets_in_git: false
+  copy_local_database_to_production: false
+  copy_full_local_volume_to_production: false
